@@ -1,0 +1,8 @@
+**.vscode
+
+**coverage.out
+**coverage.html
+**gotest.json
+**golangci.out
+
+*.env
