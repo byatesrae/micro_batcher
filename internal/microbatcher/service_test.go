@@ -2,53 +2,54 @@ package microbatcher
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-type printJob = string
+func TestServiceProcess(t *testing.T) {
+	t.Parallel()
 
-// printResult aggregates the return values of a call to fmt.Print().
-type printJobResult struct {
-	n   int
-	err error
-}
+	for _, tc := range []struct {
+		name        string
+		with        *Service[string, string]
+		giveCtx     context.Context
+		giveJob     string
+		expected    string
+		expectedErr string
+	}{
+		{
+			name: "success",
+			with: New[string, string](&BatchProcessorMock[string, string]{
+				DoFunc: func(ctx context.Context, processableJobs []ProcessableJob[string, string]) error {
+					for a := range processableJobs {
+						processableJob := &processableJobs[a]
 
-type printerProcessor struct{}
+						processableJob.ResultOut <- processableJob.Job + "ABC"
+					}
 
-// printerProcessor is our BatchProcessor.
-var _ BatchProcessor[printJob, printJobResult] = (*printerProcessor)(nil)
+					return nil
+				},
+			}),
+			giveCtx:  context.Background(),
+			giveJob:  "Test123",
+			expected: "Test123ABC",
+		},
+	} {
+		tc := tc
 
-func (p *printerProcessor) Do(_ context.Context, processableJobs []ProcessableJob[printJob, printJobResult]) error {
-	for a := range processableJobs {
-		processableJob := &processableJobs[a]
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		if processableJob.JobCtx.Err() != nil {
-			processableJob.ResultOut <- printJobResult{err: fmt.Errorf("job ctx: %w", processableJob.JobCtx.Err())}
+			actual, actualErr := tc.with.Process(tc.giveCtx, tc.giveJob)
 
-			continue
-		}
+			assert.Equal(t, tc.expected, actual, "actual")
 
-		n, err := fmt.Print(processableJob.Job)
-		processableJob.ResultOut <- printJobResult{err: err, n: n}
+			if tc.expectedErr != "" {
+				assert.EqualError(t, actualErr, tc.expectedErr, "actual err")
+			} else {
+				assert.NoError(t, actualErr, "actual err")
+			}
+		})
 	}
-
-	return nil
-}
-
-// addPrintJob will process s with service.
-func addPrintJob(service *Service[printJob, printJobResult], s printJob) {
-	res, err := service.Process(context.Background(), s)
-	if err != nil {
-		log.Printf("Failed to print \":%s\" with err %s", s, err)
-	}
-
-	log.Printf("Printed \":%s\" with number of bytes %v", s, res)
-}
-
-func ExampleService() {
-	service := New[printJob, printJobResult](&printerProcessor{})
-
-	go addPrintJob(service, "hello")
-	go addPrintJob(service, "world")
 }
