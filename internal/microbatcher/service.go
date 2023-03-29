@@ -29,9 +29,6 @@ type Service[Job any, JobResult any] struct {
 
 	// pendingJobs are jobs ready to be processed.
 	pendingJobs []ProcessableJob[Job, JobResult]
-
-	// newTimerFn is used to get a new timer.
-	newTimerFn func(d time.Duration) timer
 }
 
 type options struct {
@@ -66,9 +63,6 @@ func New[Job any, JobResult any](p BatchProcessor[Job, JobResult], overrides ...
 		processor:      p,
 		batchCycle:     options.batchCycle,
 		batchSizeLimit: options.batchSizeLimit,
-		newTimerFn: func(d time.Duration) timer {
-			return &standardTimer{timer: time.NewTimer(d)}
-		},
 	}
 }
 
@@ -135,17 +129,17 @@ func (s *Service[Job, JobResult]) queueJob(ctx context.Context, job Job, resultO
 	}
 
 	if s.batchCycleCancel == nil {
-		batchCycleTimer := s.newTimerFn(s.batchCycle)
+		batchCycleTimer := time.NewTimer(s.batchCycle)
 		batchCycleCtx, batchCycleCtxCancel := context.WithCancel(context.Background())
 
 		s.batchCycleCancel = batchCycleCtxCancel
 
 		go func() {
 			select {
-			case <-batchCycleTimer.C():
+			case <-batchCycleTimer.C:
 			case <-batchCycleCtx.Done():
 				if !batchCycleTimer.Stop() {
-					<-batchCycleTimer.C()
+					<-batchCycleTimer.C
 				}
 
 				return
@@ -186,9 +180,9 @@ func (s *Service[Job, JobResult]) processJobs(jobsToProcess []ProcessableJob[Job
 
 	if err != nil {
 		s.processorErr = err
-	}
 
-	for a := range s.pendingJobs {
-		s.pendingJobs[a].ErrOut <- fmt.Errorf("job not processed, BatchProcessor is in an error state: %w", s.processorErr)
+		for a := range s.pendingJobs {
+			s.pendingJobs[a].ErrOut <- fmt.Errorf("job not processed, BatchProcessor is in an error state: %w", s.processorErr)
+		}
 	}
 }

@@ -21,6 +21,8 @@ func TestServiceProcess(t *testing.T) {
 	t.Run("refuses_more_jobs", testServiceProcessRefusesJobs)
 	t.Run("unblocks_pending_jobs", testServiceProcessUnblocksPendingJobs)
 	t.Run("processes_in_batches", testServiceProcessesInBatches)
+	t.Run("processes_in_cycles", testServiceProcessesInCycles)
+	t.Run("limits_batch_size", testServiceLimitsBatchSize)
 }
 
 func testServiceProcessCanProcess(t *testing.T) {
@@ -43,8 +45,8 @@ func testServiceProcessCanProcess(t *testing.T) {
 	actual, err := with.Process(context.Background(), "Test123")
 
 	// Assert
-	assert.NoError(t, err, "Process err")
-	assert.Equal(t, "Test123ABC", actual, "Actual")
+	assert.NoError(t, err, "with.Process()")
+	assert.Equal(t, "Test123ABC", actual, "actual")
 }
 
 func testServiceCallsBatchProcessor(t *testing.T) {
@@ -59,7 +61,7 @@ func testServiceCallsBatchProcessor(t *testing.T) {
 				processableJob := &processableJobs[a]
 
 				// Assert - does the processor get the right job & ctx passed to it?
-				assert.Equal(t, processableJob.Job, processableJob.JobCtx.Value(ctxValueKey{}).(string), "ctx value")
+				assert.Equal(t, processableJob.Job, processableJob.JobCtx.Value(ctxValueKey{}).(string), "job = ctx value")
 
 				processableJob.ResultOut <- processableJob.Job
 			}
@@ -74,21 +76,21 @@ func testServiceCallsBatchProcessor(t *testing.T) {
 	go func() {
 		// Do
 		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test123"), "Test123")
-		require.NoError(t, err, "Test123 err")
+		require.NoError(t, err, "with.Process(Test123)")
 
 		wg.Done()
 	}()
 	go func() {
 		// Do
 		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test456"), "Test456")
-		require.NoError(t, err, "Test456 err")
+		require.NoError(t, err, "with.Process(Test456)")
 
 		wg.Done()
 	}()
 	go func() {
 		// Do
 		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test789"), "Test789")
-		require.NoError(t, err, "Test789 err")
+		require.NoError(t, err, "with.Process(Test789)")
 
 		wg.Done()
 	}()
@@ -102,7 +104,7 @@ func testServiceProcessRefusesJobs(t *testing.T) {
 	// Setup
 	with := New[string, string](&BatchProcessorMock[string, string]{
 		DoFunc: func(processableJobs []ProcessableJob[string, string]) error {
-			err := errors.New("Test123")
+			err := errors.New("Test123 processer error")
 
 			for a := range processableJobs {
 				processableJob := &processableJobs[a]
@@ -114,14 +116,14 @@ func testServiceProcessRefusesJobs(t *testing.T) {
 		},
 	})
 
-	_, err := with.Process(context.Background(), "Test123")
-	require.EqualError(t, err, "Test123")
+	_, err := with.Process(context.Background(), "Test456")
+	require.EqualError(t, err, "Test123 processer error", "with.Process(Test456)")
 
 	// Do
-	_, err = with.Process(context.Background(), "Test123")
+	_, err = with.Process(context.Background(), "Test789")
 
 	// Assert
-	assert.EqualError(t, err, "queue job: batch processor is no longer processing: Test123")
+	assert.EqualError(t, err, "queue job: batch processor is no longer processing: Test123 processer error", "with.Process(Test789)")
 }
 
 // testServiceProcessUnblocksPendingJobs tests that if the BatchProcessor fails and
@@ -133,18 +135,18 @@ func testServiceProcessUnblocksPendingJobs(t *testing.T) {
 	// the cycle trigger and set the batch size limit to > 1 (2 in this case).
 	//
 	// To trigger the BatchProcessor failure at the time there is 1 pending job,
-	// the processing must have already started but not finished (the use of processingSignaler
+	// the processing must have already started but not finished (the use of processingCh
 	// below).
 
 	// Setup
-	processingSignaler := make(chan interface{})
+	processingCh := make(chan interface{})
 
 	with := New[string, string](
 		&BatchProcessorMock[string, string]{
 			DoFunc: func(processableJobs []ProcessableJob[string, string]) error {
-				processingSignaler <- nil // Signal that processing has started
+				processingCh <- nil // Signal that processing has started
 
-				<-processingSignaler // Wait for signal to continue
+				<-processingCh // Wait for signal to continue
 
 				err := errors.New("Test123 job processing err")
 
@@ -166,78 +168,179 @@ func testServiceProcessUnblocksPendingJobs(t *testing.T) {
 
 	go func() { // Trigger the processor with these 2 jobs
 		_, err := with.Process(context.Background(), "Test_1")
-		require.EqualError(t, err, "Test123 job processing err", "first job")
+		require.EqualError(t, err, "Test123 job processing err", "with.Process(Test_1)")
 
 		wg.Done()
 	}()
 
 	go func() {
 		_, err := with.Process(context.Background(), "Test_2")
-		require.EqualError(t, err, "Test123 job processing err", "first job")
+		require.EqualError(t, err, "Test123 job processing err", "with.Process(Test_2)")
 
 		wg.Done()
 	}()
 
-	<-processingSignaler // The above jobs are being processed when this receives
+	<-processingCh // The above jobs are being processed when this receives
 
 	// Do
 	go func() {
 		_, err := with.Process(context.Background(), "Test_3")
-		assert.EqualError(t, err, "job not processed, BatchProcessor is in an error state: Test123 job processing err", "third job")
+		assert.EqualError(t, err, "job not processed, BatchProcessor is in an error state: Test123 job processing err", "with.Process(Test_3)")
 
 		wg.Done()
 	}()
 
 	waitUntilServiceHasPendingJobCount(with, 1)
 
-	processingSignaler <- nil // Signal the processor to continue and fail
+	processingCh <- nil // Signal the processor to continue and fail
 
 	wg.Wait() // Wait for all assertions
 }
 
 func testServiceProcessesInBatches(t *testing.T) {
-	// Steup
+	t.Parallel()
+
+	// Setup
 	jobs := []int{2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192}
 
-	processedJobsCh := make(chan []int)
+	batchProcessor := &BatchProcessorMock[int, int]{
+		DoFunc: func(processableJobs []ProcessableJob[int, int]) error {
+			for a := range processableJobs {
+				processableJobs[a].ResultOut <- 1
+			}
+
+			return nil
+		},
+	}
 
 	with := New[int, int](
-		&BatchProcessorMock[int, int]{
-			DoFunc: func(processableJobs []ProcessableJob[int, int]) error {
-				var processedJobs []int
-
-				for a := range processableJobs {
-					processableJob := &processableJobs[a]
-
-					processedJobs = append(processedJobs, processableJob.Job)
-
-					processableJob.ResultOut <- processableJob.Job
-				}
-
-				go func() { processedJobsCh <- processedJobs }()
-
-				return nil
-			},
-		},
+		batchProcessor,
 		WithBatchCycle(time.Hour*9999), // Timer effectively disabled
 		WithBatchSizeLimit(len(jobs)),  // Don't trigger until all jobs are in
 	)
 
 	// Do
+	wg := sync.WaitGroup{}
+	wg.Add(len(jobs))
+
 	for a := range jobs {
 		job := jobs[a]
 
 		go func() {
 			_, err := with.Process(context.Background(), job)
-			require.NoError(t, err, fmt.Sprintf("process %v", job))
+			require.NoError(t, err, fmt.Sprintf("with.Process(%v)", job))
+
+			wg.Done()
 		}()
 	}
 
-	processedJobs := <-processedJobsCh
-	sort.Ints(processedJobs)
+	wg.Wait()
 
 	// Assert
+	if !assert.Len(t, batchProcessor.calls.Do, 1, "batchProcessor.calls.Do len") {
+		return
+	}
+
+	var processedJobs []int
+	for a := range batchProcessor.calls.Do[0].ProcessableJobs {
+		processableJob := batchProcessor.calls.Do[0].ProcessableJobs[a]
+
+		processedJobs = append(processedJobs, processableJob.Job)
+	}
+	sort.Ints(processedJobs)
+
 	assert.Equal(t, jobs, processedJobs, "processedJobs")
+}
+
+func testServiceProcessesInCycles(t *testing.T) {
+	t.Parallel()
+
+	// Setup
+	cycleDuration := time.Millisecond * 50
+
+	with := New[string, string](
+		&BatchProcessorMock[string, string]{
+			DoFunc: func(processableJobs []ProcessableJob[string, string]) error {
+				for a := range processableJobs {
+					processableJob := &processableJobs[a]
+
+					processableJob.ResultOut <- "done"
+				}
+
+				return nil
+			},
+		},
+		WithBatchCycle(cycleDuration),
+		WithBatchSizeLimit(9999), // Effectively disable for this test
+	)
+
+	// Do
+	start := time.Now()
+
+	iterations := 20
+	for a := 0; a < iterations; a++ {
+		name := fmt.Sprintf("TestJob%v", a)
+
+		_, err := with.Process(context.Background(), name)
+		require.NoError(t, err, fmt.Sprintf("with.Process(%v)", name))
+	}
+
+	totalDuration := time.Since(start)
+
+	// Assert - If these prove flaky, may need to swap out Service's internal timer for something this test can control.
+	assert.Greater(t, totalDuration, cycleDuration*time.Duration(iterations-1), "lower bound")
+	assert.Less(t, totalDuration, cycleDuration*time.Duration(iterations+1), "upper bound")
+}
+
+func testServiceLimitsBatchSize(t *testing.T) {
+	t.Parallel()
+
+	// Setup
+	batchSizeLimit := 5
+
+	batchProcessor := &BatchProcessorMock[string, string]{
+		DoFunc: func(processableJobs []ProcessableJob[string, string]) error {
+			for a := range processableJobs {
+				processableJobs[a].ResultOut <- "done"
+			}
+
+			return nil
+		},
+	}
+
+	with := New[string, string](batchProcessor, WithBatchSizeLimit(batchSizeLimit))
+
+	// Do
+	totalJobsCount := batchSizeLimit * 5
+
+	wg := sync.WaitGroup{}
+	wg.Add(totalJobsCount)
+
+	for a := 0; a < totalJobsCount; a++ {
+		a := a
+
+		go func() {
+			name := fmt.Sprintf("TestJob%v", a)
+
+			_, err := with.Process(context.Background(), name)
+			require.NoError(t, err, fmt.Sprintf("with.Process(%v)", name))
+
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+
+	// Assert
+	totalProcessedJobsCount := 0
+	for a := range batchProcessor.calls.Do {
+		count := len(batchProcessor.calls.Do[a].ProcessableJobs)
+		totalProcessedJobsCount += count
+
+		assert.LessOrEqual(t, count, batchSizeLimit, fmt.Sprintf("batchProcessor.calls.Do[%v].ProcessableJobs len", a))
+	}
+
+	assert.Equal(t, totalProcessedJobsCount, totalJobsCount, "totalProcessedJobsCount")
 }
 
 func waitUntilServiceHasPendingJobCount[Job any, JobResult any](s *Service[Job, JobResult], n int) {
