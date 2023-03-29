@@ -19,7 +19,7 @@ type printerProcessor struct{}
 // printerProcessor is our BatchProcessor.
 var _ BatchProcessor[printJob, printJobResult] = (*printerProcessor)(nil)
 
-func (p *printerProcessor) Do(_ context.Context, processableJobs []ProcessableJob[printJob, printJobResult]) error {
+func (p *printerProcessor) Do(processableJobs []ProcessableJob[printJob, printJobResult]) error {
 	for a := range processableJobs {
 		processableJob := &processableJobs[a]
 

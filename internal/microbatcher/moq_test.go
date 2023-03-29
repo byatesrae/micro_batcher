@@ -4,7 +4,6 @@
 package microbatcher
 
 import (
-	"context"
 	"sync"
 )
 
@@ -18,7 +17,7 @@ var _ BatchProcessor[any, any] = &BatchProcessorMock[any, any]{}
 //
 //		// make and configure a mocked BatchProcessor
 //		mockedBatchProcessor := &BatchProcessorMock{
-//			DoFunc: func(ctx context.Context, processableJobs []ProcessableJob[Job, JobResult]) error {
+//			DoFunc: func(processableJobs []ProcessableJob[Job, JobResult]) error {
 //				panic("mock out the Do method")
 //			},
 //		}
@@ -29,14 +28,12 @@ var _ BatchProcessor[any, any] = &BatchProcessorMock[any, any]{}
 //	}
 type BatchProcessorMock[Job any, JobResult any] struct {
 	// DoFunc mocks the Do method.
-	DoFunc func(ctx context.Context, processableJobs []ProcessableJob[Job, JobResult]) error
+	DoFunc func(processableJobs []ProcessableJob[Job, JobResult]) error
 
 	// calls tracks calls to the methods.
 	calls struct {
 		// Do holds details about calls to the Do method.
 		Do []struct {
-			// Ctx is the ctx argument value.
-			Ctx context.Context
 			// ProcessableJobs is the processableJobs argument value.
 			ProcessableJobs []ProcessableJob[Job, JobResult]
 		}
@@ -45,21 +42,19 @@ type BatchProcessorMock[Job any, JobResult any] struct {
 }
 
 // Do calls DoFunc.
-func (mock *BatchProcessorMock[Job, JobResult]) Do(ctx context.Context, processableJobs []ProcessableJob[Job, JobResult]) error {
+func (mock *BatchProcessorMock[Job, JobResult]) Do(processableJobs []ProcessableJob[Job, JobResult]) error {
 	if mock.DoFunc == nil {
 		panic("BatchProcessorMock.DoFunc: method is nil but BatchProcessor.Do was just called")
 	}
 	callInfo := struct {
-		Ctx             context.Context
 		ProcessableJobs []ProcessableJob[Job, JobResult]
 	}{
-		Ctx:             ctx,
 		ProcessableJobs: processableJobs,
 	}
 	mock.lockDo.Lock()
 	mock.calls.Do = append(mock.calls.Do, callInfo)
 	mock.lockDo.Unlock()
-	return mock.DoFunc(ctx, processableJobs)
+	return mock.DoFunc(processableJobs)
 }
 
 // DoCalls gets all the calls that were made to Do.
@@ -67,11 +62,9 @@ func (mock *BatchProcessorMock[Job, JobResult]) Do(ctx context.Context, processa
 //
 //	len(mockedBatchProcessor.DoCalls())
 func (mock *BatchProcessorMock[Job, JobResult]) DoCalls() []struct {
-	Ctx             context.Context
 	ProcessableJobs []ProcessableJob[Job, JobResult]
 } {
 	var calls []struct {
-		Ctx             context.Context
 		ProcessableJobs []ProcessableJob[Job, JobResult]
 	}
 	mock.lockDo.RLock()
