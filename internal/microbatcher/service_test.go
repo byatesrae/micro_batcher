@@ -3,6 +3,8 @@ package microbatcher
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +17,10 @@ func TestServiceProcess(t *testing.T) {
 	t.Parallel()
 
 	t.Run("can_process", testServiceProcessCanProcess)
+	t.Run("calls_batch_processor", testServiceCallsBatchProcessor)
 	t.Run("refuses_more_jobs", testServiceProcessRefusesJobs)
 	t.Run("unblocks_pending_jobs", testServiceProcessUnblocksPendingJobs)
+	t.Run("processes_in_batches", testServiceProcessesInBatches)
 }
 
 func testServiceProcessCanProcess(t *testing.T) {
@@ -43,6 +47,55 @@ func testServiceProcessCanProcess(t *testing.T) {
 	assert.Equal(t, "Test123ABC", actual, "Actual")
 }
 
+func testServiceCallsBatchProcessor(t *testing.T) {
+	t.Parallel()
+
+	// Setup
+	type ctxValueKey struct{}
+
+	with := New[string, string](&BatchProcessorMock[string, string]{
+		DoFunc: func(processableJobs []ProcessableJob[string, string]) error {
+			for a := range processableJobs {
+				processableJob := &processableJobs[a]
+
+				// Assert - does the processor get the right job & ctx passed to it?
+				assert.Equal(t, processableJob.Job, processableJob.JobCtx.Value(ctxValueKey{}).(string), "ctx value")
+
+				processableJob.ResultOut <- processableJob.Job
+			}
+
+			return nil
+		},
+	})
+
+	wg := sync.WaitGroup{}
+	wg.Add(3) // 3 jobs added below
+
+	go func() {
+		// Do
+		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test123"), "Test123")
+		require.NoError(t, err, "Test123 err")
+
+		wg.Done()
+	}()
+	go func() {
+		// Do
+		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test456"), "Test456")
+		require.NoError(t, err, "Test456 err")
+
+		wg.Done()
+	}()
+	go func() {
+		// Do
+		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test789"), "Test789")
+		require.NoError(t, err, "Test789 err")
+
+		wg.Done()
+	}()
+
+	wg.Wait()
+}
+
 func testServiceProcessRefusesJobs(t *testing.T) {
 	t.Parallel()
 
@@ -62,7 +115,7 @@ func testServiceProcessRefusesJobs(t *testing.T) {
 	})
 
 	_, err := with.Process(context.Background(), "Test123")
-	assert.EqualError(t, err, "Test123")
+	require.EqualError(t, err, "Test123")
 
 	// Do
 	_, err = with.Process(context.Background(), "Test123")
@@ -135,18 +188,63 @@ func testServiceProcessUnblocksPendingJobs(t *testing.T) {
 		wg.Done()
 	}()
 
-	waitUntilServiceHasPendingJobs(with)
+	waitUntilServiceHasPendingJobCount(with, 1)
 
 	processingSignaler <- nil // Signal the processor to continue and fail
 
 	wg.Wait() // Wait for all assertions
 }
 
-func waitUntilServiceHasPendingJobs[Job any, JobResult any](s *Service[Job, JobResult]) {
+func testServiceProcessesInBatches(t *testing.T) {
+	// Steup
+	jobs := []int{2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192}
+
+	processedJobsCh := make(chan []int)
+
+	with := New[int, int](
+		&BatchProcessorMock[int, int]{
+			DoFunc: func(processableJobs []ProcessableJob[int, int]) error {
+				var processedJobs []int
+
+				for a := range processableJobs {
+					processableJob := &processableJobs[a]
+
+					processedJobs = append(processedJobs, processableJob.Job)
+
+					processableJob.ResultOut <- processableJob.Job
+				}
+
+				go func() { processedJobsCh <- processedJobs }()
+
+				return nil
+			},
+		},
+		WithBatchCycle(time.Hour*9999), // Timer effectively disabled
+		WithBatchSizeLimit(len(jobs)),  // Don't trigger until all jobs are in
+	)
+
+	// Do
+	for a := range jobs {
+		job := jobs[a]
+
+		go func() {
+			_, err := with.Process(context.Background(), job)
+			require.NoError(t, err, fmt.Sprintf("process %v", job))
+		}()
+	}
+
+	processedJobs := <-processedJobsCh
+	sort.Ints(processedJobs)
+
+	// Assert
+	assert.Equal(t, jobs, processedJobs, "processedJobs")
+}
+
+func waitUntilServiceHasPendingJobCount[Job any, JobResult any](s *Service[Job, JobResult], n int) {
 	c := make(chan interface{})
 	go func() {
 		for {
-			if s.PendingJobCount() == 1 {
+			if s.PendingJobCount() == n {
 				c <- nil
 				return
 			}

@@ -39,27 +39,27 @@ type options struct {
 	batchSizeLimit int
 }
 
-func WithBatchCycle(d time.Duration) func(o options) {
-	return func(o options) {
+func WithBatchCycle(d time.Duration) func(o *options) {
+	return func(o *options) {
 		o.batchCycle = d
 	}
 }
 
-func WithBatchSizeLimit(limit int) func(o options) {
-	return func(o options) {
+func WithBatchSizeLimit(limit int) func(o *options) {
+	return func(o *options) {
 		o.batchSizeLimit = limit
 	}
 }
 
 // New creates a new [Service].
-func New[Job any, JobResult any](p BatchProcessor[Job, JobResult], overrides ...func(o options)) *Service[Job, JobResult] {
+func New[Job any, JobResult any](p BatchProcessor[Job, JobResult], overrides ...func(o *options)) *Service[Job, JobResult] {
 	options := options{
 		batchCycle:     time.Second,
 		batchSizeLimit: 32,
 	}
 
 	for _, override := range overrides {
-		override(options)
+		override(&options)
 	}
 
 	return &Service[Job, JobResult]{
