@@ -18,8 +18,8 @@ type Service[Job any, JobResult any] struct {
 
 	processor BatchProcessor[Job, JobResult]
 
-	// batchMu covers this whole object.
-	batchMu sync.Mutex
+	// mu covers this whole object.
+	mu sync.Mutex
 
 	// batchCycleCancel is set when a cycle is active and can be used to cancel it.
 	batchCycleCancel func()
@@ -92,15 +92,15 @@ func (s *Service[Job, JobResult]) Shutdown(ctx context.Context) error {
 
 // PendingJobCount returns the number of pending jobs.
 func (s *Service[Job, JobResult]) PendingJobCount() int {
-	s.batchMu.Lock()
-	defer s.batchMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	return len(s.pendingJobs)
 }
 
 func (s *Service[Job, JobResult]) queueJob(ctx context.Context, job Job, resultOut chan<- JobResult, errOut chan<- error) error {
-	s.batchMu.Lock()
-	defer s.batchMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.processorErr != nil {
 		return fmt.Errorf("batch processor is no longer processing: %w", s.processorErr)
@@ -145,8 +145,8 @@ func (s *Service[Job, JobResult]) queueJob(ctx context.Context, job Job, resultO
 				return
 			}
 
-			s.batchMu.Lock()
-			defer s.batchMu.Unlock()
+			s.mu.Lock()
+			defer s.mu.Unlock()
 
 			s.batchCycleCancel = nil
 
@@ -175,8 +175,8 @@ func (s *Service[Job, JobResult]) processJobs(jobsToProcess []ProcessableJob[Job
 
 	err := s.processor.Do(jobsToProcess)
 
-	s.batchMu.Lock()
-	defer s.batchMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if err != nil {
 		s.processorErr = err

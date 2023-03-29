@@ -75,24 +75,24 @@ func testServiceCallsBatchProcessor(t *testing.T) {
 
 	go func() {
 		// Do
+		defer wg.Done()
+
 		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test123"), "Test123")
 		require.NoError(t, err, "with.Process(Test123)")
-
-		wg.Done()
 	}()
 	go func() {
 		// Do
+		defer wg.Done()
+
 		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test456"), "Test456")
 		require.NoError(t, err, "with.Process(Test456)")
-
-		wg.Done()
 	}()
 	go func() {
 		// Do
+		defer wg.Done()
+
 		_, err := with.Process(context.WithValue(context.Background(), ctxValueKey{}, "Test789"), "Test789")
 		require.NoError(t, err, "with.Process(Test789)")
-
-		wg.Done()
 	}()
 
 	wg.Wait()
@@ -167,27 +167,27 @@ func testServiceProcessUnblocksPendingJobs(t *testing.T) {
 	wg.Add(3) // 3 jobs being processed
 
 	go func() { // Trigger the processor with these 2 jobs
+		defer wg.Done()
+
 		_, err := with.Process(context.Background(), "Test_1")
 		require.EqualError(t, err, "Test123 job processing err", "with.Process(Test_1)")
-
-		wg.Done()
 	}()
 
 	go func() {
+		defer wg.Done()
+
 		_, err := with.Process(context.Background(), "Test_2")
 		require.EqualError(t, err, "Test123 job processing err", "with.Process(Test_2)")
-
-		wg.Done()
 	}()
 
 	<-processingCh // The above jobs are being processed when this receives
 
 	// Do
 	go func() {
+		defer wg.Done()
+
 		_, err := with.Process(context.Background(), "Test_3")
 		assert.EqualError(t, err, "job not processed, BatchProcessor is in an error state: Test123 job processing err", "with.Process(Test_3)")
-
-		wg.Done()
 	}()
 
 	waitUntilServiceHasPendingJobCount(with, 1)
@@ -227,10 +227,10 @@ func testServiceProcessesInBatches(t *testing.T) {
 		job := jobs[a]
 
 		go func() {
+			defer wg.Done()
+
 			_, err := with.Process(context.Background(), job)
 			require.NoError(t, err, fmt.Sprintf("with.Process(%v)", job))
-
-			wg.Done()
 		}()
 	}
 
@@ -320,12 +320,12 @@ func testServiceLimitsBatchSize(t *testing.T) {
 		a := a
 
 		go func() {
+			defer wg.Done()
+
 			name := fmt.Sprintf("TestJob%v", a)
 
 			_, err := with.Process(context.Background(), name)
 			require.NoError(t, err, fmt.Sprintf("with.Process(%v)", name))
-
-			wg.Done()
 		}()
 	}
 
