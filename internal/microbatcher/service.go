@@ -31,7 +31,7 @@ type Service[Job any, JobResult any] struct {
 	pendingJobs []ProcessableJob[Job, JobResult]
 
 	// newTimerFn is used to get a new timer.
-	newTimerFn func(d time.Duration) Timer
+	newTimerFn func(d time.Duration) timer
 }
 
 type options struct {
@@ -66,7 +66,7 @@ func New[Job any, JobResult any](p BatchProcessor[Job, JobResult], overrides ...
 		processor:      p,
 		batchCycle:     options.batchCycle,
 		batchSizeLimit: options.batchSizeLimit,
-		newTimerFn: func(d time.Duration) Timer {
+		newTimerFn: func(d time.Duration) timer {
 			return &standardTimer{timer: time.NewTimer(d)}
 		},
 	}

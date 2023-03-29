@@ -2,7 +2,7 @@ package microbatcher
 
 import "time"
 
-type Timer interface {
+type timer interface {
 	C() <-chan time.Time
 	Stop() bool
 }
