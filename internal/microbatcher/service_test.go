@@ -396,7 +396,8 @@ func testServiceShutdownWaitsForJobs(t *testing.T) {
 		go func() {
 			defer processJobsWg.Done()
 
-			with.Process(context.Background(), jobs[a])
+			_, err := with.Process(context.Background(), jobs[a])
+			require.NoError(t, err, "with.Process(%s)", jobs[a])
 
 			t.Logf("Job %v done", a)
 		}()
