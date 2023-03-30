@@ -27,6 +27,10 @@ type Service[Job any, JobResult any] struct {
 	// processorErr is set once if processor ever returns an error.
 	processorErr error
 
+	isShutdown bool
+
+	batchProcessorWG sync.WaitGroup
+
 	// pendingJobs are jobs ready to be processed.
 	pendingJobs []ProcessableJob[Job, JobResult]
 }
@@ -87,6 +91,18 @@ func (s *Service[Job, JobResult]) Process(ctx context.Context, job Job) (JobResu
 
 // Shutdown the processing.
 func (s *Service[Job, JobResult]) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	s.isShutdown = true
+
+	jobsToProcess := s.pendingJobs
+	s.pendingJobs = nil
+
+	s.startProcessing(jobsToProcess)
+
+	s.mu.Unlock()
+
+	s.batchProcessorWG.Wait()
+
 	return nil
 }
 
@@ -96,6 +112,15 @@ func (s *Service[Job, JobResult]) PendingJobCount() int {
 	defer s.mu.Unlock()
 
 	return len(s.pendingJobs)
+}
+
+// ProcessorErr returns the last BatchProcessor error, if any. This value will not
+// change once BatchProcessor returns an error.
+func (s *Service[Job, JobResult]) ProcessorErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.processorErr
 }
 
 func (s *Service[Job, JobResult]) queueJob(ctx context.Context, job Job, resultOut chan<- JobResult, errOut chan<- error) error {
@@ -123,7 +148,7 @@ func (s *Service[Job, JobResult]) queueJob(ctx context.Context, job Job, resultO
 		jobsToProcess := s.pendingJobs
 		s.pendingJobs = nil
 
-		go s.processJobs(jobsToProcess)
+		s.startProcessing(jobsToProcess)
 
 		return nil
 	}
@@ -161,28 +186,33 @@ func (s *Service[Job, JobResult]) queueJob(ctx context.Context, job Job, resultO
 			jobsToProcess := s.pendingJobs
 			s.pendingJobs = nil
 
-			go s.processJobs(jobsToProcess)
+			s.startProcessing(jobsToProcess)
 		}()
 	}
 
 	return nil
 }
 
-func (s *Service[Job, JobResult]) processJobs(jobsToProcess []ProcessableJob[Job, JobResult]) {
+func (s *Service[Job, JobResult]) startProcessing(jobsToProcess []ProcessableJob[Job, JobResult]) {
 	if len(jobsToProcess) == 0 {
 		return
 	}
 
-	err := s.processor.Do(jobsToProcess)
+	s.batchProcessorWG.Add(1)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	go func() {
+		err := s.processor.Do(jobsToProcess)
+		defer s.batchProcessorWG.Done()
 
-	if err != nil {
-		s.processorErr = err
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-		for a := range s.pendingJobs {
-			s.pendingJobs[a].ErrOut <- fmt.Errorf("job not processed, BatchProcessor is in an error state: %w", s.processorErr)
+		if err != nil {
+			s.processorErr = err
+
+			for a := range s.pendingJobs {
+				s.pendingJobs[a].ErrOut <- fmt.Errorf("job not processed, BatchProcessor is in an error state: %w", s.processorErr)
+			}
 		}
-	}
+	}()
 }

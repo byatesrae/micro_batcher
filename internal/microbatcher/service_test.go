@@ -20,9 +20,20 @@ func TestServiceProcess(t *testing.T) {
 	t.Run("calls_batch_processor", testServiceCallsBatchProcessor)
 	t.Run("refuses_more_jobs", testServiceProcessRefusesJobs)
 	t.Run("unblocks_pending_jobs", testServiceProcessUnblocksPendingJobs)
+}
+
+func TestService(t *testing.T) {
+	t.Parallel()
+
 	t.Run("processes_in_batches", testServiceProcessesInBatches)
 	t.Run("processes_in_cycles", testServiceProcessesInCycles)
 	t.Run("limits_batch_size", testServiceLimitsBatchSize)
+}
+
+func TestShutdown(t *testing.T) {
+	t.Parallel()
+
+	t.Run("waits_for_jobs", testServiceShutdownWaitsForJobs)
 }
 
 func testServiceProcessCanProcess(t *testing.T) {
@@ -118,6 +129,8 @@ func testServiceProcessRefusesJobs(t *testing.T) {
 
 	_, err := with.Process(context.Background(), "Test456")
 	require.EqualError(t, err, "Test123 processer error", "with.Process(Test456)")
+
+	waitUntilServiceHasProcessorErr(with)
 
 	// Do
 	_, err = with.Process(context.Background(), "Test789")
@@ -230,7 +243,7 @@ func testServiceProcessesInBatches(t *testing.T) {
 			defer wg.Done()
 
 			_, err := with.Process(context.Background(), job)
-			require.NoError(t, err, fmt.Sprintf("with.Process(%v)", job))
+			require.NoError(t, err, "with.Process(%v)", job)
 		}()
 	}
 
@@ -282,7 +295,7 @@ func testServiceProcessesInCycles(t *testing.T) {
 		name := fmt.Sprintf("TestJob%v", a)
 
 		_, err := with.Process(context.Background(), name)
-		require.NoError(t, err, fmt.Sprintf("with.Process(%v)", name))
+		require.NoError(t, err, "with.Process(%v)", name)
 	}
 
 	totalDuration := time.Since(start)
@@ -325,7 +338,7 @@ func testServiceLimitsBatchSize(t *testing.T) {
 			name := fmt.Sprintf("TestJob%v", a)
 
 			_, err := with.Process(context.Background(), name)
-			require.NoError(t, err, fmt.Sprintf("with.Process(%v)", name))
+			require.NoError(t, err, "with.Process(%v)", name)
 		}()
 	}
 
@@ -337,10 +350,91 @@ func testServiceLimitsBatchSize(t *testing.T) {
 		count := len(batchProcessor.calls.Do[a].ProcessableJobs)
 		totalProcessedJobsCount += count
 
-		assert.LessOrEqual(t, count, batchSizeLimit, fmt.Sprintf("batchProcessor.calls.Do[%v].ProcessableJobs len", a))
+		assert.LessOrEqual(t, count, batchSizeLimit, "batchProcessor.calls.Do[%v].ProcessableJobs len", a)
 	}
 
 	assert.Equal(t, totalProcessedJobsCount, totalJobsCount, "totalProcessedJobsCount")
+}
+
+func testServiceShutdownWaitsForJobs(t *testing.T) {
+	t.Parallel()
+
+	// Setup
+	jobs := []int{2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192}
+	processedJobsCh := make(chan int, len(jobs))
+
+	processingCh := make(chan interface{})
+
+	with := New[int, int](
+		&BatchProcessorMock[int, int]{
+			DoFunc: func(processableJobs []ProcessableJob[int, int]) error {
+				processingCh <- nil // Signal that processing has started
+
+				<-processingCh // Wait for signal to continue
+
+				for a := range processableJobs {
+					processableJob := &processableJobs[a]
+
+					processableJob.ResultOut <- 1
+
+					processedJobsCh <- processableJob.Job // Signal that the job is now "processed"
+				}
+
+				return nil
+			},
+		},
+		WithBatchCycle(time.Hour*24),  // Effectively disabled
+		WithBatchSizeLimit(len(jobs)), // Should not trigger until all jobs queued
+	)
+
+	processJobsWg := sync.WaitGroup{}
+	processJobsWg.Add(len(jobs))
+
+	for a := 0; a < len(jobs); a++ { // Queue jobs up for processing
+		a := a
+
+		go func() {
+			defer processJobsWg.Done()
+
+			with.Process(context.Background(), jobs[a])
+
+			t.Logf("Job %v done", a)
+		}()
+	}
+
+	<-processingCh // The above jobs are being processed when this receives
+
+	// Do
+	shutdownDone := make(chan interface{})
+	go func() {
+		err := with.Shutdown(context.Background())
+
+		// If the BatchProcessor tries to send on this after the above Shutdown()
+		// call returns we'd see a panic. However, theoretically, something could
+		// asynchronously send on this at the same time Shutdown() returns, just
+		// before the channel close. However, this is probably a "good enough" safeguard
+		// for now.
+		close(processedJobsCh)
+
+		require.NoError(t, err, "with.Shutdown()")
+
+		close(shutdownDone)
+	}()
+
+	processingCh <- nil // Signal to the processor to continue
+
+	<-shutdownDone
+
+	processJobsWg.Wait()
+
+	// Assert
+	var processedJobs []int
+	for job, ok := <-processedJobsCh; ok; job, ok = <-processedJobsCh {
+		processedJobs = append(processedJobs, job)
+	}
+	sort.Ints(processedJobs)
+
+	assert.Equal(t, jobs, processedJobs, "processedJobs")
 }
 
 func waitUntilServiceHasPendingJobCount[Job any, JobResult any](s *Service[Job, JobResult], n int) {
@@ -348,6 +442,21 @@ func waitUntilServiceHasPendingJobCount[Job any, JobResult any](s *Service[Job, 
 	go func() {
 		for {
 			if s.PendingJobCount() == n {
+				c <- nil
+				return
+			}
+
+			time.Sleep(time.Millisecond * 100)
+		}
+	}()
+	<-c
+}
+
+func waitUntilServiceHasProcessorErr[Job any, JobResult any](s *Service[Job, JobResult]) {
+	c := make(chan interface{})
+	go func() {
+		for {
+			if s.ProcessorErr() != nil {
 				c <- nil
 				return
 			}
