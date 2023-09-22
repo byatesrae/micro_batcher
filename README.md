@@ -10,3 +10,6 @@
 ```
 make help
 ```
+
+## Assumptions
+[Please see comments on this PR.](https://github.com/byatesrae/micro_batcher/pull/1)
